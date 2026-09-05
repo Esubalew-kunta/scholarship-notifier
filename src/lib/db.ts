@@ -11,24 +11,31 @@ declare global {
   var __pgPool: Pool | undefined
 }
 
-function makePool() {
+/**
+ * Created on first query, never at import time — the build imports these
+ * modules without runtime env vars, and a missing DATABASE_URL should fail
+ * the request, not the build.
+ */
+export function getPool(): Pool {
+  if (global.__pgPool) return global.__pgPool
+
   const connectionString = process.env.DATABASE_URL
   if (!connectionString) throw new Error('DATABASE_URL is not set')
-  return new Pool({
+
+  const pool = new Pool({
     connectionString,
     ssl: { rejectUnauthorized: false },
-    // Supabase transaction pooler + serverless: keep it to a single connection.
+    // Supabase transaction pooler + serverless: one connection per instance.
     max: 1,
     idleTimeoutMillis: 10_000,
     connectionTimeoutMillis: 10_000,
   })
+  global.__pgPool = pool
+  return pool
 }
 
-export const pool: Pool = global.__pgPool ?? makePool()
-if (process.env.NODE_ENV !== 'production') global.__pgPool = pool
-
 export async function q<T = any>(text: string, params: any[] = []): Promise<T[]> {
-  const res = await pool.query(text, params)
+  const res = await getPool().query(text, params)
   return res.rows as T[]
 }
 
