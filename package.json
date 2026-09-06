@@ -10,7 +10,7 @@
     "tg:webhook": "node scripts/set-webhook.mjs"
   },
   "dependencies": {
-    "next": "15.5.4",
+    "next": "15.5.25",
     "pg": "^8.13.1",
     "react": "19.1.0",
     "react-dom": "19.1.0"
