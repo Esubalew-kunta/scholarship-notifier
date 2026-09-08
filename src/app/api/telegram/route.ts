@@ -80,8 +80,8 @@ async function handleStart(from: any, chatId: number) {
     await sendMessage(
       chatId,
       '✅ <b>You are in, ' + esc(name) + '.</b>\n\n' +
-        'I will DM you before every intake <b>opens</b> and again before it <b>closes</b> — and I will nag until you tap ✅ Applied.\n\n' +
-        'The important part: when a scholarship depends on a university admission, I will not let you look at the scholarship date without telling you whether that admission is still reachable.\n\n' +
+        'I will DM you <b>every day</b> an intake is open — from the day it opens to the day it shuts — and I will not stop until you tap ✅ I have already applied.\n\n' +
+        'The important part: when a scholarship needs a university admission, I will not let you look at the scholarship date without telling you whether at least one admission that qualifies you is still reachable.\n\n' +
         'Send /list to see what is coming up.',
     )
     return
@@ -121,14 +121,22 @@ async function handleList(member: Member, chatId: number) {
     `select o.id, o.kind, o.title, o.country, o.url,
             to_char(o.opens_on,  'YYYY-MM-DD') as opens_on,
             to_char(o.closes_on, 'YYYY-MM-DD') as closes_on,
-            p.title as parent_title,
-            pa.status as parent_status,
-            to_char(p.closes_on, 'YYYY-MM-DD') as parent_closes_on,
-            coalesce(a.status, 'watching') as my_status
+            coalesce(a.status, 'watching') as my_status,
+            coalesce((
+              select json_agg(json_build_object(
+                       'title', p.title,
+                       'closes_on', to_char(p.closes_on, 'YYYY-MM-DD'),
+                       'status', coalesce(pa.status, 'watching'))
+                       order by p.closes_on asc nulls last, p.title asc)
+                from opportunity_links l
+                join opportunities p
+                  on p.id = l.admission_id and p.is_archived = false
+                left join applications pa
+                  on pa.opportunity_id = p.id and pa.member_id = $1
+               where o.kind = 'scholarship' and l.scholarship_id = o.id
+            ), '[]'::json) as admissions
        from opportunities o
-       left join opportunities p  on p.id = o.parent_id
-       left join applications a   on a.opportunity_id = o.id and a.member_id = $1
-       left join applications pa  on pa.opportunity_id = p.id and pa.member_id = $1
+       left join applications a on a.opportunity_id = o.id and a.member_id = $1
       where o.is_archived = false
         and (o.closes_on is null or o.closes_on >= current_date)
       order by coalesce(o.closes_on, o.opens_on, '2999-12-31') asc
@@ -158,11 +166,19 @@ async function handleList(member: Member, chatId: number) {
     }
     if (bits.length) lines.push('   <i>' + bits.join(' · ') + '</i>')
 
-    if (r.kind === 'scholarship' && r.parent_title && r.parent_status !== 'applied') {
-      const blocked = r.parent_closes_on && daysBetween(r.parent_closes_on, t) < 0
+    // Holding any one linked admission is enough, so only flag it when none
+    // has been secured — and only call it blocked when every route has shut.
+    const admissions: any[] = r.admissions ?? []
+    if (r.kind === 'scholarship' && admissions.length && !admissions.some((a) => a.status === 'applied')) {
+      const live = admissions.filter(
+        (a) => a.status !== 'skipped' && (!a.closes_on || daysBetween(a.closes_on, t) >= 0),
+      )
+      const names = (live.length ? live : admissions).slice(0, 2).map((a) => esc(a.title)).join(' or ')
+      const extra = (live.length ? live : admissions).length - 2
       lines.push(
-        '   ' + (blocked ? '🚨' : '⚠️') + ' needs admission <b>' + esc(r.parent_title) + '</b>' +
-          (blocked ? ' — <b>closed</b>' : ''),
+        '   ' + (live.length ? '⚠️' : '🚨') + ' needs admission <b>' + names + '</b>' +
+          (extra > 0 ? ' (+' + extra + ')' : '') +
+          (live.length ? '' : ' — <b>all closed</b>'),
       )
     }
     lines.push('')
@@ -254,7 +270,7 @@ async function handleStatus(member: Member, chatId: number) {
 
 const HELP =
   '🎓 <b>Scholarship &amp; Admission Tracker</b>\n\n' +
-  'I remind you before an intake opens, again before it closes, and I keep nagging until you tap ✅ Applied.\n\n' +
+  'I warn you a week before an intake opens, then remind you <b>every single day</b> it is open, until you tap ✅ I have already applied.\n\n' +
   '<b>Commands</b>\n' +
   '/list — what is coming up\n' +
   '/status — your own tally\n' +
@@ -312,8 +328,10 @@ async function handleCallback(cb: any) {
     // If it was an admission, say what it just unlocked.
     if (opp.kind === 'admission') {
       const kids = await q1<{ n: number }>(
-        `select count(*)::int as n from opportunities
-          where parent_id = $1 and is_archived = false`,
+        `select count(*)::int as n
+           from opportunity_links l
+           join opportunities c on c.id = l.scholarship_id and c.is_archived = false
+          where l.admission_id = $1`,
         [oppId],
       )
       if ((kids?.n ?? 0) > 0) {

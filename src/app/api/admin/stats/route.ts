@@ -19,8 +19,10 @@ export async function GET(req: Request) {
             and closes_on >= current_date and closes_on <= current_date + 30)::int as closing_soon,
         (select count(*) from opportunities
           where is_archived=false and opens_on is not null and opens_on > current_date)::int as upcoming,
-        (select count(*) from opportunities
-          where is_archived=false and kind='scholarship' and parent_id is null)::int as orphans,
+        (select count(*) from opportunities o
+          where o.is_archived=false and o.kind='scholarship'
+            and not exists (select 1 from opportunity_links l
+                             where l.scholarship_id = o.id))::int as orphans,
         (select count(*) from opportunities where is_archived = true)::int as archived,
         (select count(*) from members where status='active')::int as members_active,
         (select count(*) from members where status='pending')::int as members_pending,

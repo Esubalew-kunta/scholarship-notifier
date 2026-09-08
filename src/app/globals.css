@@ -139,6 +139,30 @@ label.lbl {
 }
 .req { color: var(--danger); }
 
+/* label on the left, the house example on the right; wraps on narrow forms */
+label.lbl-row {
+  display: flex; flex-wrap: wrap; align-items: baseline;
+  justify-content: space-between; gap: 1px 10px;
+}
+.lbl-name { flex: 0 0 auto; }
+.lbl-eg {
+  flex: 0 1 auto; font-weight: 450; font-size: 11.5px; font-style: italic;
+  color: var(--text-3); line-height: 1.4;
+}
+.lbl-help {
+  position: relative; display: inline-block; margin-left: 5px;
+  color: var(--text-3); cursor: help; font-style: normal; outline: none;
+}
+.lbl-help:hover, .lbl-help:focus { color: var(--accent); }
+.lbl-tip {
+  display: none; position: absolute; left: 0; top: calc(100% + 7px); z-index: 60;
+  width: 234px; padding: 9px 11px; border-radius: 9px;
+  background: var(--text); color: var(--bg);
+  font-size: 11.5px; font-weight: 450; font-style: normal; line-height: 1.5;
+  box-shadow: var(--shadow-lg); white-space: normal; letter-spacing: 0;
+}
+.lbl-help:hover .lbl-tip, .lbl-help:focus .lbl-tip { display: block; }
+
 input[type='text'], input[type='date'], input[type='url'], input[type='password'],
 select, textarea {
   width: 100%; padding: 9px 11px;
@@ -178,6 +202,76 @@ select { cursor: pointer; }
   background: var(--warn-soft); color: var(--warn);
   border-radius: 8px; line-height: 1.45;
 }
+
+/* ------------------------------------------------------------
+   Link picker — admission <-> scholarship multi-select
+   ------------------------------------------------------------ */
+.picker-count {
+  float: right; font-weight: 600; color: var(--accent);
+  background: var(--accent-soft); padding: 1px 7px; border-radius: 20px;
+  font-size: 11px;
+}
+.picker-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 7px; }
+.picker-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 8px; border-radius: 7px; cursor: pointer;
+  background: var(--accent-soft); color: var(--accent);
+  border: 1px solid transparent; font: inherit; font-size: 12px; font-weight: 560;
+  max-width: 100%; text-align: left; line-height: 1.3;
+}
+.picker-chip:hover { border-color: var(--accent); }
+.picker-chip span { font-size: 14px; opacity: .65; flex: 0 0 auto; }
+
+.picker {
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  background: var(--surface-2); overflow: hidden;
+}
+.picker-search {
+  border: none !important; border-bottom: 1px solid var(--border) !important;
+  border-radius: 0 !important; background: transparent !important;
+  font-size: 13px !important; padding: 8px 11px !important;
+}
+.picker-search:focus { box-shadow: none !important; }
+
+/* Always a box of the same height, so a list of 2 and a list of 40 look and
+   behave identically — you scroll inside it, the form never stretches. */
+.picker-list {
+  height: 186px; overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
+}
+.picker-list::-webkit-scrollbar { width: 9px; }
+.picker-list::-webkit-scrollbar-track { background: transparent; }
+.picker-list::-webkit-scrollbar-thumb {
+  background: var(--border-strong); border-radius: 6px;
+  border: 2px solid var(--surface-2);
+}
+.picker-list::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+.picker-foot {
+  padding: 6px 11px; font-size: 11px; color: var(--text-3);
+  border-top: 1px solid var(--border); background: var(--surface);
+}
+.picker-item {
+  display: flex; gap: 9px; align-items: flex-start;
+  padding: 8px 11px; cursor: pointer; border-bottom: 1px solid var(--border);
+}
+.picker-item:last-child { border-bottom: none; }
+.picker-item:hover { background: var(--surface); }
+.picker-item[data-on] { background: var(--accent-soft); }
+.picker-item input[type='checkbox'] {
+  width: 15px; height: 15px; margin-top: 2px; flex: 0 0 auto;
+  accent-color: var(--accent); cursor: pointer;
+}
+.picker-item > span { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.picker-item-title { font-size: 13px; font-weight: 540; color: var(--text); line-height: 1.35; }
+.picker-item-sub { font-size: 11.5px; color: var(--text-3); }
+.picker-empty {
+  padding: 11px; font-size: 12.5px; color: var(--text-3);
+  border: 1px dashed var(--border-strong); border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+/* fee input: amount + currency side by side */
+.fee-row { display: grid; grid-template-columns: 1fr 92px; gap: 8px; }
 
 .disclosure {
   width: 100%; text-align: left; padding: 8px 0; margin: 4px 0 10px;
@@ -289,6 +383,8 @@ select { cursor: pointer; }
   font-variant-numeric: tabular-nums;
 }
 .date-pill b { color: var(--text); font-weight: 600; }
+.fee-pill { border-color: var(--border-strong); }
+.fee-pill b { font-variant-numeric: tabular-nums; }
 
 .gate {
   margin-top: 9px; padding: 8px 11px; border-radius: 8px;

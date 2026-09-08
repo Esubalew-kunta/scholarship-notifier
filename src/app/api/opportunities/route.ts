@@ -1,43 +1,28 @@
 import { NextResponse } from 'next/server'
-import { q, q1 } from '@/lib/db'
-import { listOpportunities, validateOpportunity } from '@/lib/opportunities'
+import { q, q1, tx } from '@/lib/db'
+import { listLinkOptions, listOpportunities, replaceLinks, validateOpportunity } from '@/lib/opportunities'
 import { broadcastNew } from '@/lib/reminders'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-/** Public browse + the admission dropdown that feeds the form. */
+/** Public browse + the link pickers that feed the form. */
 export async function GET(req: Request) {
   const s = new URL(req.url).searchParams
   try {
     const rows = await listOpportunities({
       q: s.get('q'),
       kind: s.get('kind'),
-      country: s.get('country'),
-      degree_level: s.get('degree_level'),
-      funding: s.get('funding'),
       timing: s.get('timing'),
-      link: s.get('link'),
       sort: s.get('sort'),
     })
 
-    const admissions = await q(
-      `select id, title, country,
-              to_char(closes_on, 'YYYY-MM-DD') as closes_on
-         from opportunities
-        where kind = 'admission' and is_archived = false
-        order by title asc`,
-    )
-    const countries = await q<{ country: string }>(
-      `select distinct country from opportunities
-        where country is not null and is_archived = false
-        order by country`,
-    )
+    const options = await listLinkOptions()
 
     return NextResponse.json({
       opportunities: rows,
-      admissions,
-      countries: countries.map((c) => c.country),
+      admissions: options.filter((o) => o.kind === 'admission'),
+      scholarships: options.filter((o) => o.kind === 'scholarship'),
     })
   } catch (e: any) {
     console.error('GET /api/opportunities', e)
@@ -59,15 +44,6 @@ export async function POST(req: Request) {
   const v = checked.value
 
   try {
-    if (v.parent_id) {
-      const parent = await q1(`select id from opportunities where id = $1 and kind = 'admission'`, [
-        v.parent_id,
-      ])
-      if (!parent) {
-        return NextResponse.json({ error: 'The linked admission no longer exists.' }, { status: 400 })
-      }
-    }
-
     const dupe = await q1<{ id: string }>(
       `select id from opportunities
         where lower(title) = lower($1)
@@ -83,29 +59,36 @@ export async function POST(req: Request) {
       )
     }
 
-    const row = await q1<{ id: string }>(
-      `insert into opportunities
-         (kind, title, country, org, url, opens_on, closes_on,
-          parent_id, degree_level, funding, notes, added_by)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-       returning id`,
-      [
-        v.kind, v.title, v.country, v.org, v.url, v.opens_on, v.closes_on,
-        v.parent_id, v.degree_level, v.funding, v.notes, v.added_by,
-      ],
-    )
+    const created = await tx(async (c) => {
+      const ins = await c.query<{ id: string }>(
+        `insert into opportunities
+           (kind, title, country, org, url, opens_on, closes_on,
+            degree_level, funding, application_fee, fee_currency, notes, added_by)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         returning id`,
+        [
+          v.kind, v.title, v.country, v.org, v.url, v.opens_on, v.closes_on,
+          v.degree_level, v.funding, v.application_fee, v.fee_currency, v.notes, v.added_by,
+        ],
+      )
+      const id = ins.rows[0].id
+      const linked = await replaceLinks(c, id, v.kind, v.links)
+      if ('error' in linked) throw Object.assign(new Error(linked.error), { userMessage: linked.error })
+      return id
+    })
 
     // Best effort — a Telegram outage must not fail the submission.
     let notified = 0
     try {
-      notified = await broadcastNew(row!.id)
+      notified = await broadcastNew(created)
     } catch (e) {
       console.error('broadcastNew failed', e)
     }
 
-    return NextResponse.json({ id: row!.id, notified }, { status: 201 })
+    return NextResponse.json({ id: created, notified }, { status: 201 })
   } catch (e: any) {
     console.error('POST /api/opportunities', e)
+    if (e?.userMessage) return NextResponse.json({ error: e.userMessage }, { status: 400 })
     return NextResponse.json({ error: 'Could not save. Please try again.' }, { status: 500 })
   }
 }

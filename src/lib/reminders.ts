@@ -1,13 +1,23 @@
 import { q } from './db'
 import { sendMessage, esc } from './telegram'
 import { daysBetween, humanDays, prettyDate } from './dates'
+import { formatFee, type Currency } from './types'
+
+/** A linked admission, carrying this member's own status on it. */
+export interface GateAdmission {
+  id: string
+  title: string
+  url: string | null
+  closes_on: string | null
+  status: 'watching' | 'applied' | 'skipped'
+}
 
 export interface DueRow {
   member_id: string
   chat_id: string
   opportunity_id: string
   tag: string
-  reason: 'opens' | 'closes' | 'nag'
+  reason: 'window' | 'opens'
   kind: 'admission' | 'scholarship'
   title: string
   country: string | null
@@ -17,14 +27,13 @@ export interface DueRow {
   closes_on: string | null
   degree_level: string | null
   funding: string | null
+  application_fee: number | null
+  fee_currency: Currency | null
   notes: string | null
-  parent_id: string | null
-  parent_title: string | null
-  parent_opens_on: string | null
-  parent_closes_on: string | null
-  parent_url: string | null
-  parent_status: 'watching' | 'applied' | 'skipped' | null
-  child_count: number
+  /** scholarships only — every admission that qualifies you for this one */
+  admissions: GateAdmission[]
+  /** admissions only — how many scholarships this unlocks */
+  unlocks: number
 }
 
 const DUE_SQL = `
@@ -33,82 +42,109 @@ const DUE_SQL = `
          o.kind, o.title, o.country, o.org, o.url,
          to_char(o.opens_on, 'YYYY-MM-DD')  as opens_on,
          to_char(o.closes_on, 'YYYY-MM-DD') as closes_on,
-         o.degree_level, o.funding, o.notes,
-         p.id as parent_id, p.title as parent_title, p.url as parent_url,
-         to_char(p.opens_on, 'YYYY-MM-DD')  as parent_opens_on,
-         to_char(p.closes_on, 'YYYY-MM-DD') as parent_closes_on,
-         pa.status as parent_status,
-         (select count(*) from opportunities c
-           where c.parent_id = o.id and c.is_archived = false)::int as child_count
+         o.degree_level, o.funding,
+         o.application_fee::float8 as application_fee, o.fee_currency,
+         o.notes,
+         coalesce((
+           select json_agg(json_build_object(
+                    'id', p.id, 'title', p.title, 'url', p.url,
+                    'closes_on', to_char(p.closes_on, 'YYYY-MM-DD'),
+                    'status', coalesce(pa.status, 'watching'))
+                    order by p.closes_on asc nulls last, p.title asc)
+             from opportunity_links l
+             join opportunities p
+               on p.id = l.admission_id and p.is_archived = false
+             left join applications pa
+               on pa.opportunity_id = p.id and pa.member_id = d.member_id
+            where o.kind = 'scholarship' and l.scholarship_id = o.id
+         ), '[]'::json) as admissions,
+         (select count(*)
+            from opportunity_links l2
+            join opportunities c on c.id = l2.scholarship_id and c.is_archived = false
+           where o.kind = 'admission' and l2.admission_id = o.id)::int as unlocks
     from due d
     join opportunities o on o.id = d.opportunity_id
-    left join opportunities p on p.id = o.parent_id
-    left join applications pa
-           on pa.opportunity_id = p.id and pa.member_id = d.member_id
    order by o.closes_on nulls last, o.opens_on nulls last
 `
 
 export { daysBetween, humanDays, prettyDate } from './dates'
 
+/** Comma-list of at most `max` titles, with "and N more" beyond that. */
+function nameList(items: { title: string }[], max = 3): string {
+  const shown = items.slice(0, max).map((a) => '<b>' + esc(a.title) + '</b>')
+  const rest = items.length - shown.length
+  const joined =
+    shown.length === 1 ? shown[0]
+    : shown.slice(0, -1).join(', ') + ' or ' + shown[shown.length - 1]
+  return rest > 0 ? joined + ' (+' + rest + ' more)' : joined
+}
+
 /**
- * The point of the whole app: a scholarship reminder is only meaningful if
- * the admission it hangs off has actually been secured. This turns that
- * dependency into a sentence the reader can act on.
+ * The point of the whole app: a scholarship reminder is only meaningful if at
+ * least one admission that qualifies you for it is still reachable. With
+ * several admissions feeding one scholarship, a single secured offer is enough
+ * — so this reports the best case across all of them, not the worst.
  */
 export function gateBlock(r: DueRow, today: string): string {
   if (r.kind === 'admission') {
-    if (r.child_count > 0) {
-      const s = r.child_count === 1 ? '' : 's'
-      return '\n🔓 <b>Unlocks ' + r.child_count + ' scholarship' + s +
+    if (r.unlocks > 0) {
+      const s = r.unlocks === 1 ? '' : 's'
+      return '\n🔓 <b>Unlocks ' + r.unlocks + ' scholarship' + s +
         '</b> you are tracking. Miss this and they all go with it.'
     }
     return ''
   }
 
-  if (!r.parent_id) {
+  const all = r.admissions ?? []
+  if (!all.length) {
     return '\n💡 Not linked to an admission yet. If it needs one, link it so you get warned in time.'
   }
 
-  const status = r.parent_status ?? 'watching'
-  const name = esc(r.parent_title)
+  const applied = all.filter((a) => a.status === 'applied')
+  if (applied.length) {
+    return '\n✅ You applied to ' + nameList(applied) + ' — you are eligible for this.'
+  }
 
-  if (status === 'applied') {
-    return '\n✅ Admission <b>' + name + '</b> — already applied. You are eligible.'
+  const reachable = all.filter(
+    (a) => a.status !== 'skipped' && (!a.closes_on || daysBetween(a.closes_on, today) >= 0),
+  )
+
+  if (!reachable.length) {
+    const s = all.length === 1 ? '' : 's'
+    return '\n🚨 <b>BLOCKED.</b> Every admission that qualifies you (' + all.length +
+      ' route' + s + ') has closed or been passed on. Out of reach this cycle.'
   }
-  if (status === 'skipped') {
-    return '\n🚫 You marked admission <b>' + name + '</b> as "not for me", so this scholarship is not reachable.'
-  }
-  if (r.parent_closes_on && daysBetween(r.parent_closes_on, today) < 0) {
-    return '\n🚨 <b>BLOCKED.</b> Admission <b>' + name + '</b> closed ' +
-      prettyDate(r.parent_closes_on) +
-      ' and you never marked it applied. This scholarship is out of reach this cycle.'
-  }
-  if (r.parent_closes_on) {
-    const d = daysBetween(r.parent_closes_on, today)
-    return '\n⚠️ <b>Admission first.</b> You have not applied to <b>' + name +
-      '</b>, which closes ' + prettyDate(r.parent_closes_on) + ' (' + humanDays(d) +
-      '). No admission → no scholarship.'
-  }
-  return '\n⚠️ <b>Admission first.</b> You have not applied to <b>' + name + '</b> yet. Secure that before this.'
+
+  const soonest = reachable.find((a) => a.closes_on)
+  const deadline = soonest?.closes_on
+    ? ' The soonest closes ' + prettyDate(soonest.closes_on) +
+      ' (' + humanDays(daysBetween(soonest.closes_on, today)) + ').'
+    : ''
+
+  return '\n⚠️ <b>Admission first.</b> You need ' + nameList(reachable) + '.' +
+    deadline + ' No admission → no scholarship.'
 }
 
 export function buildMessage(r: DueRow, today: string): { text: string; buttons: any[][] } {
   const icon = r.kind === 'admission' ? '🎓' : '💰'
   const label = r.kind === 'admission' ? 'Admission' : 'Scholarship'
 
+  const toClose = r.closes_on ? daysBetween(r.closes_on, today) : null
+  const toOpen = r.opens_on ? daysBetween(r.opens_on, today) : null
+
   let headline: string
-  if (r.reason === 'opens' && r.opens_on) {
-    const d = daysBetween(r.opens_on, today)
-    headline = d === 0
-      ? '🟢 <b>Applications open TODAY</b>'
-      : '🔔 <b>Opens ' + humanDays(d) + '</b> — ' + prettyDate(r.opens_on)
-  } else if (r.reason === 'closes' && r.closes_on) {
-    const d = daysBetween(r.closes_on, today)
-    headline = d === 0
-      ? '🔴 <b>LAST DAY — closes today</b>'
-      : '⏳ <b>Closes ' + humanDays(d) + '</b> — ' + prettyDate(r.closes_on)
+  if (r.reason === 'opens') {
+    headline = '🔔 <b>Opens ' + humanDays(toOpen ?? 0) + '</b> — ' + prettyDate(r.opens_on)
+  } else if (toClose === 0) {
+    headline = '🔴 <b>LAST DAY — closes today</b>'
+  } else if (toClose !== null && toClose <= 7) {
+    headline = '🚨 <b>Closes ' + humanDays(toClose) + '</b> — ' + prettyDate(r.closes_on)
+  } else if (toOpen === 0) {
+    headline = '🟢 <b>Applications open TODAY</b>'
+  } else if (toClose !== null) {
+    headline = '⏳ <b>Open now — ' + toClose + ' days left</b> · closes ' + prettyDate(r.closes_on)
   } else {
-    headline = '⏰ <b>Still open — did you apply?</b>'
+    headline = '⏰ <b>Open now — have you applied?</b>'
   }
 
   const meta: string[] = []
@@ -129,6 +165,9 @@ export function buildMessage(r: DueRow, today: string): { text: string; buttons:
   ]
   if (window.length) lines.push('📅 ' + window.join(' · '))
 
+  const fee = formatFee(r.application_fee, r.fee_currency)
+  if (fee) lines.push('💳 Application fee: <b>' + esc(fee) + '</b>')
+
   const gate = gateBlock(r, today)
   if (gate) lines.push(gate)
 
@@ -136,13 +175,18 @@ export function buildMessage(r: DueRow, today: string): { text: string; buttons:
 
   const linkRow: any[] = []
   if (r.url) linkRow.push({ text: '🔗 Open page', url: r.url })
-  if (r.kind === 'scholarship' && r.parent_url && r.parent_status !== 'applied') {
-    linkRow.push({ text: '🎓 Admission page', url: r.parent_url })
+  if (r.kind === 'scholarship') {
+    const next = (r.admissions ?? []).find((a) => a.status !== 'applied' && a.url)
+    if (next?.url && !(r.admissions ?? []).some((a) => a.status === 'applied')) {
+      linkRow.push({ text: '🎓 Admission page', url: next.url })
+    }
   }
 
+  // Daily messages make snooze worth keeping: three quiet days without
+  // having to lie and say you applied.
   const buttons: any[][] = [
+    [{ text: '✅ I have already applied', callback_data: 'a:' + r.opportunity_id }],
     [
-      { text: '✅ Applied', callback_data: 'a:' + r.opportunity_id },
       { text: '⏰ Snooze 3d', callback_data: 's:' + r.opportunity_id },
       { text: '🚫 Not for me', callback_data: 'x:' + r.opportunity_id },
     ],
@@ -202,10 +246,18 @@ export async function broadcastNew(opportunityId: string): Promise<number> {
     `select o.id, o.kind, o.title, o.country, o.org, o.url, o.added_by,
             to_char(o.opens_on, 'YYYY-MM-DD')  as opens_on,
             to_char(o.closes_on, 'YYYY-MM-DD') as closes_on,
-            p.title as parent_title,
+            o.application_fee::float8 as application_fee, o.fee_currency,
+            coalesce((
+              select json_agg(x.title order by x.title)
+                from opportunity_links l
+                join opportunities x
+                  on x.id = case when o.kind = 'scholarship' then l.admission_id
+                                 else l.scholarship_id end
+               where (o.kind = 'scholarship' and l.scholarship_id = o.id)
+                  or (o.kind = 'admission'   and l.admission_id   = o.id)
+            ), '[]'::json) as link_titles,
             m.chat_id::text as chat_id
        from opportunities o
-       left join opportunities p on p.id = o.parent_id
        cross join members m
       where o.id = $1 and m.status = 'active' and m.chat_id is not null`,
     [opportunityId],
@@ -215,6 +267,14 @@ export async function broadcastNew(opportunityId: string): Promise<number> {
   const o = rows[0]
   const icon = o.kind === 'admission' ? '🎓' : '💰'
   const bits = [o.country, o.org].filter(Boolean).map(esc)
+  const titles: string[] = o.link_titles ?? []
+  const fee = formatFee(o.application_fee, o.fee_currency)
+
+  const linkLine = titles.length
+    ? (o.kind === 'scholarship'
+        ? '🔗 Open to holders of: <b>' + titles.map(esc).join('</b>, <b>') + '</b>'
+        : '🔓 Unlocks: <b>' + titles.map(esc).join('</b>, <b>') + '</b>')
+    : ''
 
   const lines = [
     '🆕 <b>New ' + o.kind + ' added</b>',
@@ -223,14 +283,15 @@ export async function broadcastNew(opportunityId: string): Promise<number> {
     bits.length ? '<i>' + bits.join(' · ') + '</i>' : '',
     o.opens_on ? '📅 Opens ' + prettyDate(o.opens_on) : '',
     o.closes_on ? '⏳ Closes ' + prettyDate(o.closes_on) : '',
-    o.parent_title ? '🔗 Part of admission: <b>' + esc(o.parent_title) + '</b>' : '',
+    fee ? '💳 Application fee: <b>' + esc(fee) + '</b>' : '',
+    linkLine,
     o.added_by ? '\n<i>added by ' + esc(o.added_by) + '</i>' : '',
   ].filter(Boolean)
 
   const buttons: any[][] = []
   if (o.url) buttons.push([{ text: '🔗 Open page', url: o.url }])
   buttons.push([
-    { text: '✅ Already applied', callback_data: 'a:' + o.id },
+    { text: '✅ I have already applied', callback_data: 'a:' + o.id },
     { text: '🚫 Not for me', callback_data: 'x:' + o.id },
   ])
 

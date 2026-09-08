@@ -2,17 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { daysBetween, humanDays, prettyDate, phaseOf, todayISO } from '@/lib/dates'
-import type { OpportunityRow } from '@/lib/types'
-import { COUNTRIES } from '@/lib/types'
+import type { LinkOption, OpportunityRow } from '@/lib/types'
+import { COUNTRIES, formatFee } from '@/lib/types'
+import LinkPicker from '@/components/LinkPicker'
+import FieldLabel from '@/components/FieldLabel'
+import { guideFor } from '@/lib/fieldGuide'
 
 const BOT = process.env.NEXT_PUBLIC_BOT_USERNAME || 'scholarship_notifybot'
-
-interface AdmissionOption {
-  id: string
-  title: string
-  country: string | null
-  closes_on: string | null
-}
 
 /* ================================================================
    Countdown
@@ -64,60 +60,71 @@ function Countdown({ o }: { o: OpportunityRow }) {
 }
 
 /* ================================================================
-   The dependency line — the reason this app exists
+   The dependency line — the reason this app exists.
+   A scholarship can be reachable through several admissions; holding any
+   one of them is enough, so this reads the best route, not the worst.
    ================================================================ */
 function GateLine({ o }: { o: OpportunityRow }) {
   const t = todayISO()
+  const links = o.links ?? []
 
   if (o.kind === 'admission') {
-    if (!o.child_count) return null
+    if (!links.length) return null
     return (
       <div className="gate gate-info">
         <span>🔓</span>
         <span>
-          Unlocks <b>{o.child_count}</b> scholarship{o.child_count === 1 ? '' : 's'}. Miss this
-          window and they all go with it.
+          Unlocks <b>{links.length}</b> scholarship{links.length === 1 ? '' : 's'}:{' '}
+          {links.map((l) => l.title).join(', ')}. Miss this window and they all go with it.
         </span>
       </div>
     )
   }
 
-  if (!o.parent_id) {
+  if (!links.length) {
     return (
       <div className="gate gate-warn">
         <span>💡</span>
-        <span>
-          Not linked to an admission. If it needs one, link it so nobody chases a dead end.
-        </span>
+        <span>Not linked to an admission. If it needs one, link it so nobody chases a dead end.</span>
       </div>
     )
   }
 
-  const closed = o.parent_closes_on && daysBetween(o.parent_closes_on, t) < 0
-  if (closed) {
+  const reachable = links.filter((l) => !l.closes_on || daysBetween(l.closes_on, t) >= 0)
+
+  if (!reachable.length) {
     return (
       <div className="gate gate-block">
         <span>🚨</span>
         <span>
-          Needs admission <b>{o.parent_title}</b>, which <b>closed {prettyDate(o.parent_closes_on)}</b>.
-          Out of reach this cycle unless you already applied.
+          Needs one of <b>{links.length}</b> admission{links.length === 1 ? '' : 's'} —{' '}
+          <b>all closed</b>. Out of reach this cycle unless you already applied.
         </span>
       </div>
     )
   }
 
+  const soonest = reachable.find((l) => l.closes_on)
   return (
     <div className="gate gate-ok">
       <span>🎓</span>
       <span>
-        Needs admission <b>{o.parent_title}</b>
-        {o.parent_closes_on ? (
+        Open to holders of{' '}
+        {reachable.length === 1 ? (
+          <b>{reachable[0].title}</b>
+        ) : (
+          <>
+            any of <b>{reachable.length}</b> admissions: {reachable.map((l) => l.title).join(', ')}
+          </>
+        )}
+        {soonest?.closes_on ? (
           <>
             {' '}
-            — closes {prettyDate(o.parent_closes_on)} ({humanDays(daysBetween(o.parent_closes_on, t))})
+            — soonest closes {prettyDate(soonest.closes_on)} (
+            {humanDays(daysBetween(soonest.closes_on, t))})
           </>
         ) : null}
-        . Secure that first.
+        . Secure one first.
       </span>
     </div>
   )
@@ -127,9 +134,14 @@ function GateLine({ o }: { o: OpportunityRow }) {
    Card
    ================================================================ */
 function OppCard({ o, child }: { o: OpportunityRow; child?: boolean }) {
-  const meta = [o.org, o.country, o.degree_level !== 'any' ? o.degree_level : null,
-    o.funding && o.funding !== 'unknown' ? o.funding + ' funding' : null]
-    .filter(Boolean) as string[]
+  const meta = [
+    o.org,
+    o.country,
+    o.degree_level !== 'any' ? o.degree_level : null,
+    o.funding && o.funding !== 'unknown' ? o.funding + ' funding' : null,
+  ].filter(Boolean) as string[]
+
+  const fee = formatFee(o.application_fee, o.fee_currency)
 
   return (
     <article className={'opp' + (child ? ' is-child' : '') + (o.is_archived ? ' is-archived' : '')}>
@@ -171,6 +183,11 @@ function OppCard({ o, child }: { o: OpportunityRow; child?: boolean }) {
             </span>
           )}
           {!o.opens_on && !o.closes_on && <span className="date-pill">Dates not set</span>}
+          {fee && (
+            <span className="date-pill fee-pill">
+              Fee <b>{fee}</b>
+            </span>
+          )}
         </div>
 
         <GateLine o={o} />
@@ -185,7 +202,7 @@ function OppCard({ o, child }: { o: OpportunityRow; child?: boolean }) {
 }
 
 /* ================================================================
-   Add form — six visible fields, the rest folded away
+   Add form
    ================================================================ */
 const EMPTY = {
   kind: 'admission' as 'admission' | 'scholarship',
@@ -194,22 +211,26 @@ const EMPTY = {
   url: '',
   opens_on: '',
   closes_on: '',
-  parent_id: '',
   org: '',
   degree_level: 'any',
   funding: 'unknown',
+  application_fee: '',
+  fee_currency: 'EUR',
   notes: '',
   added_by: '',
 }
 
 function AddForm({
   admissions,
+  scholarships,
   onAdded,
 }: {
-  admissions: AdmissionOption[]
+  admissions: LinkOption[]
+  scholarships: LinkOption[]
   onAdded: () => void
 }) {
   const [f, setF] = useState({ ...EMPTY })
+  const [links, setLinks] = useState<string[]>([])
   const [more, setMore] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -222,9 +243,21 @@ function AddForm({
     if (saved) setF((p) => ({ ...p, added_by: saved }))
   }, [])
 
-  const parent = admissions.find((a) => a.id === f.parent_id)
-  const parentClosedBeforeScholarshipOpens =
-    parent?.closes_on && f.opens_on && parent.closes_on < f.opens_on
+  const isAdmission = f.kind === 'admission'
+  const pool = isAdmission ? scholarships : admissions
+  const chosen = pool.filter((o) => links.includes(o.id))
+  const g = guideFor(f.kind)
+
+  /** Switching type swaps the whole vocabulary, so links and the fee reset. */
+  const setKind = (kind: 'admission' | 'scholarship') => {
+    setF((p) => ({ ...p, kind, application_fee: '', fee_currency: 'EUR' }))
+    setLinks([])
+  }
+
+  // The trap this app exists to catch, now across every chosen link.
+  const strandedByDate = isAdmission
+    ? chosen.filter((s) => f.closes_on && s.closes_on && f.closes_on > s.closes_on)
+    : chosen.filter((a) => a.closes_on && f.opens_on && a.closes_on < f.opens_on)
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -235,7 +268,14 @@ function AddForm({
       const res = await fetch('/api/opportunities', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...f, parent_id: f.kind === 'scholarship' ? f.parent_id : null }),
+        body: JSON.stringify({
+          ...f,
+          links,
+          // Scholarships have no application fee — you pay to apply to a
+          // university, not to be considered for its money.
+          application_fee: isAdmission ? f.application_fee : null,
+          fee_currency: isAdmission ? f.fee_currency : null,
+        }),
       })
       const json = await res.json()
       if (!res.ok) {
@@ -249,6 +289,7 @@ function AddForm({
           : 'Added to the board.',
       )
       setF({ ...EMPTY, added_by: f.added_by })
+      setLinks([])
       setMore(false)
       onAdded()
     } catch {
@@ -263,7 +304,7 @@ function AddForm({
       <div className="card-head">
         <div className="card-title">Add an intake</div>
         <div className="card-note">
-          Six fields. Everyone in the crew gets it on Telegram straight away.
+          Link it to the other side and everyone in the crew gets it on Telegram straight away.
         </div>
       </div>
 
@@ -274,27 +315,17 @@ function AddForm({
         <div className="field">
           <label className="lbl">Type <span className="req">*</span></label>
           <div className="seg">
-            <button
-              type="button"
-              aria-pressed={f.kind === 'admission'}
-              onClick={() => setF((p) => ({ ...p, kind: 'admission', parent_id: '' }))}
-            >
+            <button type="button" aria-pressed={isAdmission} onClick={() => setKind('admission')}>
               🎓 Admission
             </button>
-            <button
-              type="button"
-              aria-pressed={f.kind === 'scholarship'}
-              onClick={() => setF((p) => ({ ...p, kind: 'scholarship' }))}
-            >
+            <button type="button" aria-pressed={!isAdmission} onClick={() => setKind('scholarship')}>
               💰 Scholarship
             </button>
           </div>
         </div>
 
         <div className="field">
-          <label className="lbl" htmlFor="title">
-            Name <span className="req">*</span>
-          </label>
+          <FieldLabel htmlFor="title" required hint={g.title}>Name</FieldLabel>
           <input
             id="title"
             type="text"
@@ -302,19 +333,19 @@ function AddForm({
             maxLength={200}
             value={f.title}
             onChange={(e) => set('title', e.target.value)}
-            placeholder={f.kind === 'admission' ? 'TU Munich — MSc Informatics' : 'DAAD EPOS Scholarship'}
+            placeholder={g.title.example}
           />
         </div>
 
         <div className="field">
-          <label className="lbl" htmlFor="country">Country</label>
+          <FieldLabel htmlFor="country" hint={g.country}>Country</FieldLabel>
           <input
             id="country"
             type="text"
             list="country-list"
             value={f.country}
             onChange={(e) => set('country', e.target.value)}
-            placeholder="Germany"
+            placeholder={g.country.example}
           />
           <datalist id="country-list">
             {COUNTRIES.map((c) => (
@@ -324,51 +355,84 @@ function AddForm({
         </div>
 
         <div className="field">
-          <label className="lbl" htmlFor="url">Link</label>
+          <FieldLabel htmlFor="url" hint={g.url}>Link</FieldLabel>
           <input
             id="url"
             type="text"
             value={f.url}
             onChange={(e) => set('url', e.target.value)}
-            placeholder="tum.de/en/studies/application"
+            placeholder={g.url.example}
           />
-          <div className="hint">The info or application page. This goes in the reminder.</div>
         </div>
 
         <div className="field field-row">
           <div>
-            <label className="lbl" htmlFor="opens">Opens</label>
+            <FieldLabel htmlFor="opens" hint={g.opens_on}>Opens</FieldLabel>
             <input id="opens" type="date" value={f.opens_on} onChange={(e) => set('opens_on', e.target.value)} />
           </div>
           <div>
-            <label className="lbl" htmlFor="closes">Closes</label>
+            <FieldLabel htmlFor="closes" hint={g.closes_on}>Closes</FieldLabel>
             <input id="closes" type="date" value={f.closes_on} onChange={(e) => set('closes_on', e.target.value)} />
           </div>
         </div>
 
-        {f.kind === 'scholarship' && (
+        {isAdmission && (
           <div className="field">
-            <label className="lbl" htmlFor="parent">Part of which admission?</label>
-            <select id="parent" value={f.parent_id} onChange={(e) => set('parent_id', e.target.value)}>
-              <option value="">— standalone, no admission needed —</option>
-              {admissions.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.title}
-                  {a.country ? ' · ' + a.country : ''}
-                  {a.closes_on ? ' · closes ' + a.closes_on : ''}
-                </option>
-              ))}
-            </select>
-            <div className="hint">
-              Link it and everyone gets warned about the admission deadline before this one matters.
+            <FieldLabel htmlFor="fee" hint={g.application_fee}>Application fee</FieldLabel>
+            <div className="fee-row">
+              <input
+                id="fee"
+                type="number"
+                min="0"
+                step="0.01"
+                inputMode="decimal"
+                value={f.application_fee}
+                onChange={(e) => set('application_fee', e.target.value)}
+                placeholder="30"
+              />
+              <select
+                value={f.fee_currency}
+                onChange={(e) => set('fee_currency', e.target.value)}
+                aria-label="Currency"
+              >
+                <option value="EUR">€ EUR</option>
+                <option value="USD">$ USD</option>
+              </select>
             </div>
-            {parentClosedBeforeScholarshipOpens && (
-              <div className="hint-warn">
-                ⚠️ Heads up: that admission closes <b>{prettyDate(parent!.closes_on)}</b>, before this
-                scholarship even opens. Exactly the trap this app exists to catch — the admission has
-                to be locked in first.
-              </div>
-            )}
+            <div className="hint">Blank = unknown. 0 = free.</div>
+          </div>
+        )}
+
+        <LinkPicker
+          label={isAdmission ? 'Which scholarships does this unlock?' : 'Part of which admission(s)?'}
+          options={pool}
+          value={links}
+          onChange={setLinks}
+          hint={g.links}
+          emptyText={
+            isAdmission
+              ? 'No scholarships on the board yet — add one, then come back and link it.'
+              : 'No admissions on the board yet — add one, then come back and link it.'
+          }
+        />
+
+        {strandedByDate.length > 0 && (
+          <div className="hint-warn">
+            ⚠️ Heads up:{' '}
+            {isAdmission ? (
+              <>
+                this admission closes <b>{prettyDate(f.closes_on)}</b>, after{' '}
+                <b>{strandedByDate.map((s) => s.title).join(', ')}</b> already{' '}
+                {strandedByDate.length === 1 ? 'closes' : 'close'}.
+              </>
+            ) : (
+              <>
+                <b>{strandedByDate.map((a) => a.title).join(', ')}</b>{' '}
+                {strandedByDate.length === 1 ? 'closes' : 'close'} before this scholarship even opens
+                on <b>{prettyDate(f.opens_on)}</b>.
+              </>
+            )}{' '}
+            Exactly the trap this app exists to catch — the admission has to be locked in first.
           </div>
         )}
 
@@ -379,8 +443,10 @@ function AddForm({
         {more && (
           <>
             <div className="field">
-              <label className="lbl" htmlFor="org">University / funder</label>
-              <input id="org" type="text" value={f.org} onChange={(e) => set('org', e.target.value)} placeholder="DAAD" />
+              <FieldLabel htmlFor="org" hint={g.org}>
+                {isAdmission ? 'University' : 'Funder'}
+              </FieldLabel>
+              <input id="org" type="text" value={f.org} onChange={(e) => set('org', e.target.value)} placeholder={g.org.example} />
             </div>
             <div className="field field-row">
               <div>
@@ -402,20 +468,20 @@ function AddForm({
               </div>
             </div>
             <div className="field">
-              <label className="lbl" htmlFor="notes">Notes</label>
+              <FieldLabel htmlFor="notes" hint={g.notes}>Notes</FieldLabel>
               <textarea
                 id="notes"
                 value={f.notes}
                 onChange={(e) => set('notes', e.target.value)}
-                placeholder="IELTS 6.5 needed · motivation letter · 2 referees"
+                placeholder={g.notes.example}
               />
             </div>
           </>
         )}
 
         <div className="field">
-          <label className="lbl" htmlFor="by">Your name</label>
-          <input id="by" type="text" value={f.added_by} onChange={(e) => set('added_by', e.target.value)} placeholder="Esubalew" />
+          <FieldLabel htmlFor="by" hint={g.added_by}>Your name</FieldLabel>
+          <input id="by" type="text" value={f.added_by} onChange={(e) => set('added_by', e.target.value)} placeholder={g.added_by.example} />
         </div>
 
         <button className="btn btn-primary btn-block" disabled={busy || !f.title.trim()}>
@@ -431,15 +497,13 @@ function AddForm({
    ================================================================ */
 export default function Home() {
   const [items, setItems] = useState<OpportunityRow[]>([])
-  const [admissions, setAdmissions] = useState<AdmissionOption[]>([])
-  const [countries, setCountries] = useState<string[]>([])
+  const [admissions, setAdmissions] = useState<LinkOption[]>([])
+  const [scholarships, setScholarships] = useState<LinkOption[]>([])
   const [loading, setLoading] = useState(true)
 
   const [search, setSearch] = useState('')
   const [kind, setKind] = useState('')
   const [timing, setTiming] = useState('')
-  const [country, setCountry] = useState('')
-  const [sort, setSort] = useState('urgency')
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -447,41 +511,56 @@ export default function Home() {
     if (search.trim()) p.set('q', search.trim())
     if (kind) p.set('kind', kind)
     if (timing) p.set('timing', timing)
-    if (country) p.set('country', country)
-    if (sort) p.set('sort', sort)
     try {
       const res = await fetch('/api/opportunities?' + p.toString())
       const json = await res.json()
       setItems(json.opportunities ?? [])
       setAdmissions(json.admissions ?? [])
-      setCountries(json.countries ?? [])
+      setScholarships(json.scholarships ?? [])
     } catch {
       setItems([])
     } finally {
       setLoading(false)
     }
-  }, [search, kind, timing, country, sort])
+  }, [search, kind, timing])
 
   useEffect(() => {
     const id = setTimeout(load, search ? 300 : 0)
     return () => clearTimeout(id)
   }, [load, search])
 
-  // Nest scholarships under their admission when both survived the filters.
+  // Nest scholarships under an admission that unlocks them, when both survived
+  // the filters. A scholarship reachable through several admissions is shown
+  // once, under the first one — repeating it would just pad the list.
   const blocks = useMemo(() => {
-    const byId = new Map(items.map((o) => [o.id, o]))
-    const out: { parent: OpportunityRow; children: OpportunityRow[] }[] = []
+    const present = new Set(items.map((o) => o.id))
+    const claimed = new Set<string>()
     for (const o of items) {
-      if (o.kind === 'scholarship' && o.parent_id && byId.has(o.parent_id)) continue
-      out.push({
-        parent: o,
-        children: o.kind === 'admission' ? items.filter((c) => c.parent_id === o.id) : [],
-      })
+      if (o.kind !== 'admission') continue
+      for (const l of o.links ?? []) {
+        if (present.has(l.id) && !claimed.has(l.id)) claimed.add(l.id)
+      }
+    }
+
+    const taken = new Set<string>()
+    const out: { parent: OpportunityRow; children: OpportunityRow[] }[] = []
+    const byId = new Map(items.map((o) => [o.id, o]))
+
+    for (const o of items) {
+      if (o.kind === 'scholarship' && claimed.has(o.id)) continue
+      const children =
+        o.kind === 'admission'
+          ? ((o.links ?? [])
+              .map((l) => byId.get(l.id))
+              .filter((c): c is OpportunityRow => !!c && !taken.has(c.id)))
+          : []
+      children.forEach((c) => taken.add(c.id))
+      out.push({ parent: o, children })
     }
     return out
   }, [items])
 
-  const filtersOn = !!(search || kind || timing || country)
+  const filtersOn = !!(search || kind || timing)
 
   return (
     <div className="shell">
@@ -503,12 +582,12 @@ export default function Home() {
 
       <p className="lede">
         A scholarship date is worthless if the admission behind it already closed. Add both here,
-        link them together, and the bot will chase you — <strong>before the window opens</strong> and
-        again <strong>before it shuts</strong> — until you have actually applied.
+        link them together — one admission can unlock several scholarships — and the bot will DM you{' '}
+        <strong>every day the window is open</strong> until you say you have applied.
       </p>
 
       <div className="split">
-        <AddForm admissions={admissions} onAdded={load} />
+        <AddForm admissions={admissions} scholarships={scholarships} onAdded={load} />
 
         <div>
           <div className="tg-callout">
@@ -528,23 +607,9 @@ export default function Home() {
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search title, university, country…"
+              placeholder="Search name, university, country…"
               aria-label="Search"
             />
-            <select value={sort} onChange={(e) => setSort(e.target.value)} aria-label="Sort">
-              <option value="urgency">Most urgent</option>
-              <option value="closes">Closing date</option>
-              <option value="opens">Opening date</option>
-              <option value="newest">Recently added</option>
-              <option value="title">A → Z</option>
-              <option value="country">Country</option>
-            </select>
-            <select value={country} onChange={(e) => setCountry(e.target.value)} aria-label="Country">
-              <option value="">All countries</option>
-              {countries.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
           </div>
 
           <div className="chips">
@@ -560,10 +625,9 @@ export default function Home() {
             <span style={{ width: 10 }} />
             {[
               ['', 'Any time'],
-              ['closing', '🔥 Closing soon'],
               ['open', '🟢 Open now'],
+              ['closing', '🔥 Closing soon'],
               ['upcoming', '📅 Not open yet'],
-              ['closed', '✕ Closed'],
             ].map(([v, l]) => (
               <button key={v} className="chip" aria-pressed={timing === v} onClick={() => setTiming(v)}>
                 {l}
@@ -580,9 +644,7 @@ export default function Home() {
                   <button
                     className="chip"
                     style={{ padding: '1px 8px', fontSize: 12 }}
-                    onClick={() => {
-                      setSearch(''); setKind(''); setTiming(''); setCountry('')
-                    }}
+                    onClick={() => { setSearch(''); setKind(''); setTiming('') }}
                   >
                     clear filters
                   </button>

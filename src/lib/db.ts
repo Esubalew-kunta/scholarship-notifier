@@ -1,4 +1,4 @@
-import { Pool, types } from 'pg'
+import { Pool, types, type PoolClient } from 'pg'
 
 // DATE (oid 1082) must stay a plain 'YYYY-MM-DD' string. Left alone,
 // node-postgres builds a Date at *local* midnight, and any later
@@ -42,4 +42,24 @@ export async function q<T = any>(text: string, params: any[] = []): Promise<T[]>
 export async function q1<T = any>(text: string, params: any[] = []): Promise<T | null> {
   const rows = await q<T>(text, params)
   return rows[0] ?? null
+}
+
+/**
+ * Saving an entry and rewriting its admission/scholarship links is two
+ * statements that must not half-apply — a crash between them would leave an
+ * entry with no links at all, silently killing its reminders.
+ */
+export async function tx<T>(fn: (c: PoolClient) => Promise<T>): Promise<T> {
+  const client = await getPool().connect()
+  try {
+    await client.query('begin')
+    const out = await fn(client)
+    await client.query('commit')
+    return out
+  } catch (e) {
+    await client.query('rollback').catch(() => {})
+    throw e
+  } finally {
+    client.release()
+  }
 }

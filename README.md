@@ -5,27 +5,36 @@ nags each person until they have actually applied.
 
 The point is not "another calendar". It is the **dependency**: a scholarship that
 opens in May is worthless if the university admission behind it closed in December.
-So a scholarship is linked to its admission, and every reminder tells you whether
-that admission is still reachable *for you*.
+So scholarships and admissions are linked to each other, and every reminder tells
+you whether at least one admission that qualifies you is still reachable *for you*.
+
+The link is many-to-many, because reality is. One offer unlocks several awards,
+and one national scholarship accepts holders of any of several offers:
 
 ```
-🎓 admission (1) ──┬── 💰 scholarship
-                   ├── 💰 scholarship
-                   └── 💰 scholarship
+🎓 Verona offer ──┬── 💰 Verona merit award
+                  ├── 💰 Regional grant (Veneto) ──┐
+                  └── 💰 IYT scholarship           │
+                                                   │
+🎓 Padua offer ────────────────────────────────────┘
 ```
+
+Hold *either* offer and the regional grant is reachable. The bot works that out
+per person, from what each of them has actually applied to.
 
 ## What it does
 
 - **Open web form** — anyone with the link adds an intake. Six fields.
 - **Shared board** — the data is common to the crew; who applied is private.
-- **Telegram DMs** — before it opens (T-7, T-2, day-of), before it closes
-  (T-14, T-7, T-3, T-1, day-of), then a nag every 3 days while the window is open.
-- **The gate** — a scholarship reminder says, in plain words, whether its admission
-  is applied for, still open, or already closed.
-- **One-tap answers** — ✅ Applied / ⏰ Snooze 3d / 🚫 Not for me, right in the chat.
-  Reminders stop the moment you tap Applied.
-- **Admin dashboard** — filter across eight dimensions, full CRUD, archive,
-  member management, and a dry-run for the reminder engine.
+- **Telegram DMs** — one message a day for every open window, from the opening
+  date to the closing date, plus a single heads-up a week before it opens.
+- **The gate** — a scholarship reminder says, in plain words, whether any admission
+  that qualifies you is applied for, still open, or already closed.
+- **Application fee** — recorded in EUR or USD and shown on the card and in the DM.
+- **One-tap answers** — ✅ I have already applied / ⏰ Snooze 3d / 🚫 Not for me,
+  right in the chat. Reminders stop the moment you tap the first one.
+- **Admin dashboard** — full CRUD, archive, member management, and a dry-run for
+  the reminder engine.
 
 ## Stack
 
@@ -104,13 +113,15 @@ A preview never records anything, so the real run still delivers them.
 (member × opportunity) pair that deserves a message today. A row qualifies when:
 
 - the member is `active` and has linked their Telegram
-- the opportunity is not archived and has not closed
+- the opportunity is not archived
 - that member's status on it is still `watching` (not applied, not skipped)
 - any snooze has expired
-- the date matches a ladder step — and that exact step has not been sent before
+- today falls inside the window (`opens_on ≤ today ≤ closes_on`), or is exactly
+  seven days before it opens — and that exact message has not been sent before
 
 The last condition is the `reminders_sent` table, keyed on
-`(member, opportunity, tag)`. Tags look like `open-7`, `close-3`, `nag-2026-11-04`.
+`(member, opportunity, tag)`. Tags look like `day-2026-11-04` and `opens-soon`,
+so a day's message can only ever go out once even if the sweep runs twice.
 A row is only written after Telegram confirms delivery, so a failed send is retried
 on the next sweep rather than silently lost.
 
@@ -119,7 +130,7 @@ on the next sweep rather than silently lost.
 ```
 src/lib/
   db.ts            pooled Postgres access (DATE stays a string — see the comment)
-  reminders.ts     the ladder, the gate wording, the send loop
+  reminders.ts     the daily sweep, the gate wording, the send loop
   opportunities.ts one filter/validation layer for both the public and admin lists
   dates.ts         date maths shared by server and browser
 src/app/

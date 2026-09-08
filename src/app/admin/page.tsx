@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { daysBetween, phaseOf, todayISO } from '@/lib/dates'
-import type { OpportunityRow } from '@/lib/types'
-import { COUNTRIES } from '@/lib/types'
+import type { LinkOption, OpportunityRow } from '@/lib/types'
+import { COUNTRIES, formatFee } from '@/lib/types'
+import LinkPicker from '@/components/LinkPicker'
+import FieldLabel from '@/components/FieldLabel'
+import { guideFor } from '@/lib/fieldGuide'
 
 const KEY = 'intake:adminkey'
 const BOT = process.env.NEXT_PUBLIC_BOT_USERNAME || 'scholarship_notifybot'
-
-interface Admission { id: string; title: string; country: string | null; closes_on: string | null }
 interface Member {
   id: string
   telegram_username: string | null
@@ -87,9 +88,10 @@ const BLANK = {
   url: '',
   opens_on: '',
   closes_on: '',
-  parent_id: '',
   degree_level: 'any',
   funding: 'unknown',
+  application_fee: '',
+  fee_currency: 'EUR',
   notes: '',
   added_by: '',
   is_archived: false,
@@ -98,12 +100,14 @@ const BLANK = {
 function EditModal({
   row,
   admissions,
+  scholarships,
   adminKey,
   onClose,
   onSaved,
 }: {
   row: OpportunityRow | null
-  admissions: Admission[]
+  admissions: LinkOption[]
+  scholarships: LinkOption[]
   adminKey: string
   onClose: () => void
   onSaved: () => void
@@ -118,19 +122,32 @@ function EditModal({
           url: row.url ?? '',
           opens_on: row.opens_on ?? '',
           closes_on: row.closes_on ?? '',
-          parent_id: row.parent_id ?? '',
           degree_level: row.degree_level ?? 'any',
           funding: row.funding ?? 'unknown',
+          application_fee:
+            row.application_fee === null || row.application_fee === undefined
+              ? ''
+              : String(row.application_fee),
+          fee_currency: row.fee_currency ?? 'EUR',
           notes: row.notes ?? '',
           added_by: row.added_by ?? '',
           is_archived: row.is_archived,
         }
       : { ...BLANK },
   )
+  const [links, setLinks] = useState<string[]>((row?.links ?? []).map((l) => l.id))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
   const set = (k: string, v: any) => setF((p: any) => ({ ...p, [k]: v }))
+  const isAdmission = f.kind === 'admission'
+  const g = guideFor(f.kind)
+
+  /** Switching type swaps the whole vocabulary, so links and the fee reset. */
+  const setKind = (kind: string) => {
+    setF((p: any) => ({ ...p, kind, application_fee: '', fee_currency: 'EUR' }))
+    setLinks([])
+  }
 
   async function save(e: React.FormEvent) {
     e.preventDefault()
@@ -138,12 +155,16 @@ function EditModal({
     setError('')
     const payload = {
       ...f,
-      parent_id: f.kind === 'scholarship' ? f.parent_id || null : null,
+      links,
       country: f.country || null,
       org: f.org || null,
       url: f.url || null,
       opens_on: f.opens_on || null,
       closes_on: f.closes_on || null,
+      // Scholarships carry no application fee — you pay to apply to a
+      // university, not to be considered for its money.
+      application_fee: !isAdmission || f.application_fee === '' ? null : f.application_fee,
+      fee_currency: isAdmission ? f.fee_currency : null,
       notes: f.notes || null,
       added_by: f.added_by || null,
     }
@@ -184,65 +205,84 @@ function EditModal({
           <div className="field">
             <label className="lbl">Type</label>
             <div className="seg">
-              <button type="button" aria-pressed={f.kind === 'admission'}
-                onClick={() => setF((p: any) => ({ ...p, kind: 'admission', parent_id: '' }))}>
+              <button type="button" aria-pressed={isAdmission} onClick={() => setKind('admission')}>
                 🎓 Admission
               </button>
-              <button type="button" aria-pressed={f.kind === 'scholarship'}
-                onClick={() => set('kind', 'scholarship')}>
+              <button type="button" aria-pressed={!isAdmission} onClick={() => setKind('scholarship')}>
                 💰 Scholarship
               </button>
             </div>
+            {row && f.kind !== row.kind && (
+              <div className="hint-warn">
+                ⚠️ Changing the type clears every link on this entry — they point the wrong way now.
+              </div>
+            )}
           </div>
 
           <div className="field">
-            <label className="lbl">Name <span className="req">*</span></label>
-            <input type="text" required value={f.title} onChange={(e) => set('title', e.target.value)} />
+            <FieldLabel required hint={g.title}>Name</FieldLabel>
+            <input type="text" required value={f.title} onChange={(e) => set('title', e.target.value)} placeholder={g.title.example} />
           </div>
 
           <div className="field field-row">
             <div>
-              <label className="lbl">Country</label>
-              <input type="text" list="ac" value={f.country} onChange={(e) => set('country', e.target.value)} />
+              <FieldLabel hint={g.country}>Country</FieldLabel>
+              <input type="text" list="ac" value={f.country} onChange={(e) => set('country', e.target.value)} placeholder={g.country.example} />
               <datalist id="ac">{COUNTRIES.map((c) => <option key={c} value={c} />)}</datalist>
             </div>
             <div>
-              <label className="lbl">University / funder</label>
-              <input type="text" value={f.org} onChange={(e) => set('org', e.target.value)} />
+              <FieldLabel hint={g.org}>{isAdmission ? 'University' : 'Funder'}</FieldLabel>
+              <input type="text" value={f.org} onChange={(e) => set('org', e.target.value)} placeholder={g.org.example} />
             </div>
           </div>
 
           <div className="field">
-            <label className="lbl">Link</label>
-            <input type="text" value={f.url} onChange={(e) => set('url', e.target.value)} />
+            <FieldLabel hint={g.url}>Link</FieldLabel>
+            <input type="text" value={f.url} onChange={(e) => set('url', e.target.value)} placeholder={g.url.example} />
           </div>
 
           <div className="field field-row">
             <div>
-              <label className="lbl">Opens</label>
+              <FieldLabel hint={g.opens_on}>Opens</FieldLabel>
               <input type="date" value={f.opens_on} onChange={(e) => set('opens_on', e.target.value)} />
             </div>
             <div>
-              <label className="lbl">Closes</label>
+              <FieldLabel hint={g.closes_on}>Closes</FieldLabel>
               <input type="date" value={f.closes_on} onChange={(e) => set('closes_on', e.target.value)} />
             </div>
           </div>
 
-          {f.kind === 'scholarship' && (
+          {isAdmission && (
             <div className="field">
-              <label className="lbl">Depends on admission</label>
-              <select value={f.parent_id} onChange={(e) => set('parent_id', e.target.value)}>
-                <option value="">— standalone —</option>
-                {admissions
-                  .filter((a) => a.id !== row?.id)
-                  .map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.title}{a.closes_on ? ' · closes ' + a.closes_on : ''}
-                    </option>
-                  ))}
-              </select>
+              <FieldLabel hint={g.application_fee}>Application fee</FieldLabel>
+              <div className="fee-row">
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  inputMode="decimal"
+                  value={f.application_fee}
+                  onChange={(e) => set('application_fee', e.target.value)}
+                  placeholder="30"
+                />
+                <select value={f.fee_currency} onChange={(e) => set('fee_currency', e.target.value)} aria-label="Currency">
+                  <option value="EUR">€ EUR</option>
+                  <option value="USD">$ USD</option>
+                </select>
+              </div>
+              <div className="hint">Blank = unknown. 0 = free.</div>
             </div>
           )}
+
+          <LinkPicker
+            label={isAdmission ? 'Which scholarships does this unlock?' : 'Part of which admission(s)?'}
+            options={isAdmission ? scholarships : admissions}
+            value={links}
+            onChange={setLinks}
+            excludeId={row?.id}
+            hint={g.links}
+            emptyText={isAdmission ? 'No scholarships to link yet.' : 'No admissions to link yet.'}
+          />
 
           <div className="field field-row">
             <div>
@@ -265,14 +305,14 @@ function EditModal({
           </div>
 
           <div className="field">
-            <label className="lbl">Notes</label>
-            <textarea value={f.notes} onChange={(e) => set('notes', e.target.value)} />
+            <FieldLabel hint={g.notes}>Notes</FieldLabel>
+            <textarea value={f.notes} onChange={(e) => set('notes', e.target.value)} placeholder={g.notes.example} />
           </div>
 
           <div className="field field-row">
             <div>
-              <label className="lbl">Added by</label>
-              <input type="text" value={f.added_by} onChange={(e) => set('added_by', e.target.value)} />
+              <FieldLabel hint={g.added_by}>Added by</FieldLabel>
+              <input type="text" value={f.added_by} onChange={(e) => set('added_by', e.target.value)} placeholder={g.added_by.example} />
             </div>
             <div>
               <label className="lbl">Archived</label>
@@ -300,8 +340,8 @@ function EditModal({
    ================================================================ */
 function Board({ adminKey }: { adminKey: string }) {
   const [rows, setRows] = useState<OpportunityRow[]>([])
-  const [admissions, setAdmissions] = useState<Admission[]>([])
-  const [countries, setCountries] = useState<string[]>([])
+  const [admissions, setAdmissions] = useState<LinkOption[]>([])
+  const [scholarships, setScholarships] = useState<LinkOption[]>([])
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<OpportunityRow | null>(null)
   const [creating, setCreating] = useState(false)
@@ -310,10 +350,6 @@ function Board({ adminKey }: { adminKey: string }) {
   const [q, setQ] = useState('')
   const [kind, setKind] = useState('')
   const [timing, setTiming] = useState('')
-  const [country, setCountry] = useState('')
-  const [level, setLevel] = useState('')
-  const [funding, setFunding] = useState('')
-  const [link, setLink] = useState('')
   const [archived, setArchived] = useState('false')
   const [sort, setSort] = useState('urgency')
 
@@ -323,10 +359,6 @@ function Board({ adminKey }: { adminKey: string }) {
     if (q.trim()) p.set('q', q.trim())
     if (kind) p.set('kind', kind)
     if (timing) p.set('timing', timing)
-    if (country) p.set('country', country)
-    if (level) p.set('degree_level', level)
-    if (funding) p.set('funding', funding)
-    if (link) p.set('link', link)
     p.set('archived', archived)
     p.set('sort', sort)
     try {
@@ -334,11 +366,11 @@ function Board({ adminKey }: { adminKey: string }) {
       const j = await res.json()
       setRows(j.opportunities ?? [])
       setAdmissions(j.admissions ?? [])
-      setCountries(j.countries ?? [])
+      setScholarships(j.scholarships ?? [])
     } finally {
       setLoading(false)
     }
-  }, [adminKey, q, kind, timing, country, level, funding, link, archived, sort])
+  }, [adminKey, q, kind, timing, archived, sort])
 
   useEffect(() => {
     const t = setTimeout(load, q ? 300 : 0)
@@ -346,9 +378,10 @@ function Board({ adminKey }: { adminKey: string }) {
   }, [load, q])
 
   async function remove(row: OpportunityRow) {
+    const n = (row.links ?? []).length
     const warn =
-      row.child_count > 0
-        ? `Delete "${row.title}"? ${row.child_count} linked scholarship(s) will lose their admission link.`
+      n > 0
+        ? `Delete "${row.title}"? ${n} linked entr${n === 1 ? 'y' : 'ies'} will lose this link.`
         : `Delete "${row.title}"? This cannot be undone.`
     if (!confirm(warn)) return
     const res = await fetch('/api/admin/opportunities/' + row.id, {
@@ -371,10 +404,9 @@ function Board({ adminKey }: { adminKey: string }) {
   }
 
   const clearAll = () => {
-    setQ(''); setKind(''); setTiming(''); setCountry('')
-    setLevel(''); setFunding(''); setLink(''); setArchived('false')
+    setQ(''); setKind(''); setTiming(''); setArchived('false')
   }
-  const anyFilter = q || kind || timing || country || level || funding || link || archived !== 'false'
+  const anyFilter = q || kind || timing || archived !== 'false'
 
   return (
     <>
@@ -395,28 +427,6 @@ function Board({ adminKey }: { adminKey: string }) {
           <option value="closed">Closed</option>
           <option value="undated">No dates set</option>
         </select>
-        <select value={country} onChange={(e) => setCountry(e.target.value)}>
-          <option value="">All countries</option>
-          {countries.map((c) => <option key={c} value={c}>{c}</option>)}
-        </select>
-        <select value={level} onChange={(e) => setLevel(e.target.value)}>
-          <option value="">Any level</option>
-          <option value="bachelor">Bachelor</option>
-          <option value="master">Master</option>
-          <option value="phd">PhD</option>
-          <option value="any">Unspecified</option>
-        </select>
-        <select value={funding} onChange={(e) => setFunding(e.target.value)}>
-          <option value="">Any funding</option>
-          <option value="full">Full</option>
-          <option value="partial">Partial</option>
-          <option value="unknown">Unknown</option>
-        </select>
-        <select value={link} onChange={(e) => setLink(e.target.value)}>
-          <option value="">Any linkage</option>
-          <option value="linked">Linked to an admission</option>
-          <option value="orphan">⚠️ Scholarship with no admission</option>
-        </select>
         <select value={archived} onChange={(e) => setArchived(e.target.value)}>
           <option value="false">Live only</option>
           <option value="all">Live + archived</option>
@@ -428,7 +438,6 @@ function Board({ adminKey }: { adminKey: string }) {
           <option value="opens">Opening date</option>
           <option value="newest">Recently added</option>
           <option value="title">A → Z</option>
-          <option value="country">Country</option>
         </select>
         {anyFilter && <button className="btn btn-sm" onClick={clearAll}>Clear</button>}
         <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>+ New entry</button>
@@ -447,7 +456,8 @@ function Board({ adminKey }: { adminKey: string }) {
               <th>Country</th>
               <th>Opens</th>
               <th>Closes</th>
-              <th>Depends on</th>
+              <th>Fee</th>
+              <th>Linked to</th>
               <th>State</th>
               <th />
             </tr>
@@ -461,8 +471,13 @@ function Board({ adminKey }: { adminKey: string }) {
                 : phase === 'open' ? ['b-green', 'open']
                 : phase === 'upcoming' ? ['b-blue', 'upcoming']
                 : ['b-gray', 'no dates']
-              const parentDead =
-                r.parent_closes_on && daysBetween(r.parent_closes_on, todayISO()) < 0
+              const links = r.links ?? []
+              // A scholarship is only stranded when *every* route into it has shut.
+              const allRoutesDead =
+                r.kind === 'scholarship' &&
+                links.length > 0 &&
+                links.every((l) => l.closes_on && daysBetween(l.closes_on, todayISO()) < 0)
+              const fee = formatFee(r.application_fee, r.fee_currency)
               return (
                 <tr key={r.id} style={r.is_archived ? { opacity: 0.55 } : undefined}>
                   <td>
@@ -475,25 +490,27 @@ function Board({ adminKey }: { adminKey: string }) {
                       {r.url ? <a href={r.url} target="_blank" rel="noopener noreferrer">{r.title}</a> : r.title}
                     </div>
                     {r.org && <div className="hint">{r.org}</div>}
-                    {r.kind === 'admission' && r.child_count > 0 && (
-                      <div className="hint">🔓 unlocks {r.child_count}</div>
-                    )}
                   </td>
                   <td>{r.country || <span className="hint">—</span>}</td>
                   <td className="mono">{r.opens_on || '—'}</td>
                   <td className="mono">{r.closes_on || '—'}</td>
-                  <td style={{ maxWidth: 190 }}>
-                    {r.kind === 'scholarship' ? (
-                      r.parent_title ? (
-                        <>
-                          <div style={{ fontSize: 12.5 }}>{r.parent_title}</div>
-                          {parentDead && <span className="badge b-red">admission closed</span>}
-                        </>
-                      ) : (
+                  <td className="mono">{fee || <span className="hint">—</span>}</td>
+                  <td style={{ maxWidth: 200 }}>
+                    {links.length === 0 ? (
+                      r.kind === 'scholarship' ? (
                         <span className="badge b-yellow">standalone</span>
+                      ) : (
+                        <span className="hint">—</span>
                       )
                     ) : (
-                      <span className="hint">—</span>
+                      <>
+                        <div style={{ fontSize: 12.5 }}>
+                          {r.kind === 'admission' ? '🔓 unlocks ' : '🎓 needs any of '}
+                          <b>{links.length}</b>
+                        </div>
+                        <div className="hint">{links.map((l) => l.title).join(', ')}</div>
+                        {allRoutesDead && <span className="badge b-red">all admissions closed</span>}
+                      </>
                     )}
                   </td>
                   <td>
@@ -501,7 +518,7 @@ function Board({ adminKey }: { adminKey: string }) {
                     {r.is_archived && <div><span className="badge b-gray">archived</span></div>}
                   </td>
                   <td className="td-actions">
-                    <button className="btn btn-sm" onClick={() => setEditing(r)}>Edit</button>{' '}
+                    <button className="btn btn-sm" onClick={() => { setCreating(false); setEditing(r) }}>Edit</button>{' '}
                     <button className="btn btn-sm" onClick={() => toggleArchive(r)}>
                       {r.is_archived ? 'Restore' : 'Archive'}
                     </button>{' '}
@@ -511,7 +528,7 @@ function Board({ adminKey }: { adminKey: string }) {
               )
             })}
             {!loading && rows.length === 0 && (
-              <tr><td colSpan={8}><div className="empty" style={{ border: 'none' }}>Nothing matches.</div></td></tr>
+              <tr><td colSpan={9}><div className="empty" style={{ border: 'none' }}>Nothing matches.</div></td></tr>
             )}
           </tbody>
         </table>
@@ -519,8 +536,13 @@ function Board({ adminKey }: { adminKey: string }) {
 
       {(editing || creating) && (
         <EditModal
+          // Remount when the target changes. The form seeds its state once, on
+          // mount, so without this a modal opened for one row would keep that
+          // row's values (or a blank "new entry") while claiming to edit another.
+          key={editing?.id ?? 'new'}
           row={editing}
           admissions={admissions}
+          scholarships={scholarships}
           adminKey={adminKey}
           onClose={() => { setEditing(null); setCreating(false) }}
           onSaved={load}
